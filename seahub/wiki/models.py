@@ -1,7 +1,12 @@
 # Copyright (c) 2012-2016 Seafile Ltd.
 from django.db import models
+from django.utils import timezone
+from django.utils.translation import ugettext as _
+from seaserv import seafile_api
 
 from seahub.base.fields import LowerCaseCharField
+from .utils import slugfy_wiki_name
+
 
 class WikiDoesNotExist(Exception):
     pass
@@ -45,9 +50,73 @@ class GroupWiki(models.Model):
     repo_id = models.CharField(max_length=36)
     objects = GroupWikiManager()
 
+
+class DuplicateWikiNameError(Exception):
+    pass
+
+
+class WikiManager(models.Manager):
+    def add(self, wiki_name, permission, username, org_id):
+        if not permission:
+            permission = 'private'
+
+        slug = slugfy_wiki_name(wiki_name)
+        if self.filter(slug=slug).count() > 0:
+            raise DuplicateWikiNameError
+
+        if org_id > 0:
+            repo_id = seafile_api.create_org_repo(wiki_name, '', username,
+                                                  passwd=None, org_id=org_id)
+        else:
+            repo_id = seafile_api.create_repo(wiki_name, '', username,
+                                              passwd=None)
+
+        wiki = self.model(username=username, name=wiki_name, slug=slug,
+                          repo_id=repo_id, permission=permission)
+        wiki.save(using=self._db)
+        return wiki
+
+class Wiki(models.Model):
+    """New wiki model to enable a user has multiple wikis and replace
+    personal wiki.
+    """
+    PERM_CHOICES = (
+        ('private', _('private')),
+        ('public', _('public')),
+        ('login-user', _('login user'))
+    )
+
+    username = LowerCaseCharField(max_length=255)
+    name = models.CharField(max_length=255)
+    slug = models.CharField(max_length=255, unique=True)
+    repo_id = models.CharField(max_length=36)
+    permission = models.CharField(max_length=50)  # private, public, login
+    created_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        unique_together = (('username', 'repo_id'),)
+
+    @property
+    def link(self):
+        pass
+
+    @property
+    def updated_at(self):
+        pass
+
+    def to_dict(self):
+        return {
+            'id': self.pk,
+            'name': self.name,
+            'link': self.link,
+            'permission': self.permission,
+            'created_at': self.created_at,
+            'updated_at': self.updated_at,
+        }
+
 ###### signal handlers
 from django.dispatch import receiver
-from seahub.signals import repo_deleted    
+from seahub.signals import repo_deleted
 
 @receiver(repo_deleted)
 def remove_personal_wiki(sender, **kwargs):
@@ -55,4 +124,3 @@ def remove_personal_wiki(sender, **kwargs):
     repo_id = kwargs['repo_id']
 
     PersonalWiki.objects.filter(username=repo_owner, repo_id=repo_id).delete()
-
